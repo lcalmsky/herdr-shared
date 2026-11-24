@@ -1,5 +1,6 @@
-// The ChatGPT plan's rate limits live only in Codex Desktop's rollout logs, so cca reads the newest
-// one from <home>/sessions; the login's email is the one other file it reads, <home>/auth.json.
+// The ChatGPT plan's rate limits come from the usage endpoint Codex itself asks, with the login in
+// <home>/auth.json. Rollout logs only hold the snapshot of the last local Codex turn, so usage from
+// the web, Work or another machine never reaches them; they are read only when the endpoint fails.
 
 import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +35,29 @@ export function rateLimitsOf(text) {
     return { five, seven, plan: typeof rl.plan_type === "string" ? rl.plan_type : null };
   }
   return null;
+}
+
+// The endpoint's rate_limit carries the same two windows under other names.
+export function liveLimitsOf(body) {
+  const rl = body?.rate_limit;
+  if (!rl) return null;
+  const win = (w) => w && windowOf({ used_percent: w.used_percent, resets_at: w.reset_at });
+  const five = win(rl.primary_window);
+  const seven = win(rl.secondary_window);
+  if (!five && !seven) return null;
+  return { five, seven, plan: typeof body.plan_type === "string" ? body.plan_type : null };
+}
+
+// No token refresh here: refreshing rotates the refresh token Codex owns, so an expired login
+// falls back to the rollouts until Codex refreshes it.
+async function fetchLive(home) {
+  const tokens = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"))?.tokens;
+  if (typeof tokens?.access_token !== "string") return null;
+  const headers = { Authorization: `Bearer ${tokens.access_token}`, Accept: "application/json", "User-Agent": "codex_cli_rs" };
+  if (typeof tokens.account_id === "string") headers["ChatGPT-Account-Id"] = tokens.account_id;
+  const r = await fetch("https://chatgpt.com/backend-api/wham/usage", { headers, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) return null;
+  return liveLimitsOf(await r.json());
 }
 
 const subdirs = (path) => {
@@ -106,7 +130,14 @@ export function emailOf(home) {
   }
 }
 
-function main() {
+const print = (r) => {
+  const cell = (w, key) => (w && w[key] != null ? String(w[key]) : "");
+  const fields = [cell(r.five, "used"), cell(r.five, "resets_at"),
+    cell(r.seven, "used"), cell(r.seven, "resets_at"), r.plan ?? ""];
+  process.stdout.write(`${fields.join("\t")}\n`);
+};
+
+async function main() {
   try {
     const home = process.argv[2];
     if (home === "--email") {
@@ -115,14 +146,14 @@ function main() {
       return;
     }
     if (!home) return;
+    let live = null;
+    try { live = await fetchLive(home); } catch {}
+    if (live) { print(live); return; }
     for (const file of newestRollouts(newestDayDirs(join(home, "sessions")))) {
       let r = null;
       try { r = rateLimitsOf(tailOf(file)); } catch { continue; }
       if (!r) continue;
-      const cell = (w, key) => (w && w[key] != null ? String(w[key]) : "");
-      const fields = [cell(r.five, "used"), cell(r.five, "resets_at"),
-        cell(r.seven, "used"), cell(r.seven, "resets_at"), r.plan ?? ""];
-      process.stdout.write(`${fields.join("\t")}\n`);
+      print(r);
       return;
     }
   } catch {}

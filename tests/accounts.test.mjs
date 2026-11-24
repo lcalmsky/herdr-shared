@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fableOf } from "../bin/usage-api.mjs";
-import { emailOf, rateLimitsOf } from "../bin/codex-usage.mjs";
+import { emailOf, liveLimitsOf, rateLimitsOf } from "../bin/codex-usage.mjs";
 import { defaultUsage, matchEnv, parseModels, parseUsage, slug, usageCommand } from "../bin/models.mjs";
 
 const CCA = fileURLToPath(new URL("../bin/cca", import.meta.url));
@@ -471,6 +471,18 @@ test("the Codex usage reads the last event with a window and skips a cut line", 
   assert.equal(rateLimitsOf(line({ rate_limits: null })), null);
   assert.equal(rateLimitsOf('{"type":"event_msg","payload":{"rate_'), null, "a cut line is skipped");
   assert.equal(rateLimitsOf(""), null);
+});
+
+test("the live Codex usage reads the endpoint's two windows and plan", () => {
+  const body = { plan_type: "plus", rate_limit: {
+    primary_window: { used_percent: 12, limit_window_seconds: 18000, reset_at: 1795503838 },
+    secondary_window: { used_percent: 5, limit_window_seconds: 604800, reset_at: 1796035163 } } };
+  assert.deepEqual(liveLimitsOf(body),
+    { five: { used: 12, resets_at: 1795503838 }, seven: { used: 5, resets_at: 1796035163 }, plan: "plus" });
+  assert.deepEqual(liveLimitsOf({ rate_limit: { primary_window: null, secondary_window: { used_percent: 0 } } }),
+    { five: null, seven: { used: 0, resets_at: null }, plan: null });
+  assert.equal(liveLimitsOf({ rate_limit: { primary_window: null, secondary_window: null } }), null);
+  assert.equal(liveLimitsOf({}), null);
 });
 
 test("codex-usage prints the rollout's five fields, and nothing when there is no data", () => {
